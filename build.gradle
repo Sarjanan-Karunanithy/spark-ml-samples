@@ -13,9 +13,6 @@ subprojects {
     mavenLocal()
     mavenCentral()
 
-    maven {
-      url "http://dl.bintray.com/spark-packages/maven"
-    }
   }
 }
 

@@ -33,7 +33,7 @@ public abstract class CommonLyricsPipeline implements LyricsPipeline {
     public GenrePrediction predict(final String unknownLyrics) {
         String lyrics[] = unknownLyrics.split("\\r?\\n");
         Dataset<String> lyricsDataset = sparkSession.createDataset(Arrays.asList(lyrics),
-           Encoders.STRING());
+                Encoders.STRING());
 
         Dataset<Row> unknownLyricsDataset = lyricsDataset
                 .withColumn(LABEL.getName(), functions.lit(Genre.UNKNOWN.getValue()))
@@ -56,7 +56,10 @@ public abstract class CommonLyricsPipeline implements LyricsPipeline {
             System.out.println("Probability: " + probability);
             System.out.println("------------------------------------------------\n");
 
-            return new GenrePrediction(getGenre(prediction).getName(), probability.apply(0), probability.apply(1));
+            return new GenrePrediction(
+                    getGenre(prediction).getName(),
+                    probability.toArray()
+            );
         }
 
         System.out.println("------------------------------------------------\n");
@@ -64,18 +67,58 @@ public abstract class CommonLyricsPipeline implements LyricsPipeline {
     }
 
     Dataset<Row> readLyrics() {
-        Dataset input = readLyricsForGenre(lyricsTrainingSetDirectoryPath, Genre.METAL)
-                                                .union(readLyricsForGenre(lyricsTrainingSetDirectoryPath, Genre.POP));
-        // Reduce the input amount of partition minimal amount (spark.default.parallelism OR 2, whatever is less)
+        Genre[] genres = {
+                Genre.POP,
+                Genre.COUNTRY,
+                Genre.BLUES,
+                Genre.JAZZ,
+                Genre.REGGAE,
+                Genre.ROCK,
+                Genre.HIPHOP,
+                Genre.SOUL
+        };
+
+        Dataset<Row> input = readLyricsForGenre(lyricsTrainingSetDirectoryPath, genres[0]);
+        for (int i = 1; i < genres.length; i++) {
+            input = input.union(readLyricsForGenre(lyricsTrainingSetDirectoryPath, genres[i]));
+        }
+
         input = input.coalesce(sparkSession.sparkContext().defaultMinPartitions()).cache();
-        // Force caching.
         input.count();
 
         return input;
     }
 
+    // ✅ ADD this helper method anywhere in the class
+    private String toSparkPath(String path) {
+        String clean = path
+                .replace("file:///", "")  // remove if already has it
+                .replace("\\", "/");      // convert backslashes
+        // add file:/// for Windows drive paths like C:/...
+        if (clean.matches("^[A-Za-z]:.*")) {
+            return "file:///" + clean;
+        }
+        return clean;
+    }
+
+    // ✅ FIXED: no wildcard — Spark reads entire folder directly
     private Dataset<Row> readLyricsForGenre(String inputDirectory, Genre genre) {
-        Dataset<Row> lyrics = readLyrics(inputDirectory, genre.name().toLowerCase() + "/*");
+        //String genreFolder = Paths.get(inputDirectory, genre.name().toLowerCase()).toString();
+        // ✅ FIXED: add file:/// prefix so Spark recognises it as a local path on Windows
+        //String genreFolder = "file:///" +
+        //        Paths.get(inputDirectory, genre.name().toLowerCase())
+        //                .toString()
+        //                .replace("\\", "/");  // ✅ also convert backslashes to forward slashes
+
+        String genreFolder = toSparkPath(inputDirectory)
+                + "/" + genre.name().toLowerCase();
+        System.out.println("Reading from: " + genreFolder); // helpful debug line
+
+        Dataset<String> rawLyrics = sparkSession.read().textFile(genreFolder);
+        rawLyrics = rawLyrics.filter(rawLyrics.col(VALUE.getName()).notEqual(""));
+        rawLyrics = rawLyrics.filter(rawLyrics.col(VALUE.getName()).contains(" "));
+
+        Dataset<Row> lyrics = rawLyrics.withColumn(ID.getName(), functions.input_file_name());
         Dataset<Row> labeledLyrics = lyrics.withColumn(LABEL.getName(), functions.lit(genre.getValue()));
 
         System.out.println(genre.name() + " music sentences = " + lyrics.count());
@@ -83,24 +126,12 @@ public abstract class CommonLyricsPipeline implements LyricsPipeline {
         return labeledLyrics;
     }
 
-    private Dataset<Row> readLyrics(String inputDirectory, String path) {
-        Dataset<String> rawLyrics = sparkSession.read().textFile(Paths.get(inputDirectory).resolve(path).toString());
-        rawLyrics = rawLyrics.filter(rawLyrics.col(VALUE.getName()).notEqual(""));
-        rawLyrics = rawLyrics.filter(rawLyrics.col(VALUE.getName()).contains(" "));
-
-        // Add source filename column as a unique id.
-        Dataset<Row> lyrics = rawLyrics.withColumn(ID.getName(), functions.input_file_name());
-
-        return lyrics;
-    }
-
     private Genre getGenre(Double value) {
-        for (Genre genre: Genre.values()){
+        for (Genre genre : Genre.values()) {
             if (genre.getValue().equals(value)) {
                 return genre;
             }
         }
-
         return Genre.UNKNOWN;
     }
 
